@@ -46,34 +46,33 @@ func LoadConfig() []ServiceConfig {
 	envUser := os.Getenv("ODATA_USER")
 	envPass := os.Getenv("ODATA_PASS")
 
-	// Priority: CLI args > env vars > config file > defaults
+	// Start with default services
 	var services []ServiceConfig
+	services = append(services, DefaultServices...)
 
-	// Try to load from odatanavigator.json
+	// Add services from config file
 	if configServices := loadFromConfigFile(); configServices != nil {
-		services = configServices
-	} else {
-		services = DefaultServices
+		services = append(services, configServices...)
 	}
 
-	// Override with environment variables if provided
+	// Add environment service if provided
 	if envURL != "" {
-		services = []ServiceConfig{{
+		services = append(services, ServiceConfig{
 			Name:     "Environment Service",
 			URL:      envURL,
 			Username: envUser,
 			Password: envPass,
-		}}
+		})
 	}
 
-	// Override with CLI arguments if provided
+	// Add CLI service if provided
 	if *url != "" {
-		services = []ServiceConfig{{
+		services = append(services, ServiceConfig{
 			Name:     "CLI Service",
 			URL:      *url,
 			Username: *user,
 			Password: *pass,
-		}}
+		})
 	}
 
 	return services
