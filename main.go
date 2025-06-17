@@ -78,6 +78,7 @@ type entitySetsMsg []string
 type entitiesMsg struct {
 	entitySet string
 	entities  []map[string]interface{}
+	hasMore   bool
 }
 type previewMsg struct {
 	previewType string // "entitysets", "entities", "json"
@@ -106,11 +107,11 @@ func loadEntitySets(odata *ODataService) tea.Cmd {
 
 func loadEntities(odata *ODataService, entitySet string) tea.Cmd {
 	return func() tea.Msg {
-		entities, err := odata.GetEntities(entitySet, 10) // Default to 10 entities
+		entities, hasMore, err := odata.GetEntitiesWithCount(entitySet, 10) // Default to 10 entities
 		if err != nil {
 			return errorMsg{err: err.Error(), context: fmt.Sprintf("loadEntities(%s)", entitySet)}
 		}
-		return entitiesMsg{entitySet: entitySet, entities: entities}
+		return entitiesMsg{entitySet: entitySet, entities: entities, hasMore: hasMore}
 	}
 }
 
@@ -147,6 +148,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.columns[i].items = []string{}
 				for _, entity := range msg.entities {
 					m.columns[i].items = append(m.columns[i].items, formatEntityForDisplay(entity))
+				}
+				// Add "more" indicator if truncated
+				if msg.hasMore {
+					m.columns[i].items = append(m.columns[i].items, "[...more items]")
 				}
 				if len(m.columns[i].items) == 0 {
 					m.columns[i].items = []string{"(No items)"}
@@ -572,7 +577,7 @@ func (m model) updatePreview() tea.Cmd {
 		if m.odata != nil {
 			entitySetName := strings.Split(selectedItem, " [")[0]
 			return func() tea.Msg {
-				entities, err := m.odata.GetEntities(entitySetName, 10) // Default to 10 for preview
+				entities, _, err := m.odata.GetEntitiesWithCount(entitySetName, 10) // Default to 10 for preview
 				if err != nil {
 					return previewMsg{errorMsg: err.Error()}
 				}
@@ -841,7 +846,7 @@ func (m model) renderColumn(col column, isActive bool) string {
 			item := col.items[i]
 			style := lipgloss.NewStyle().Padding(0, 1)
 			
-			// Color function imports differently
+			// Color function imports and more indicators differently
 			if strings.HasPrefix(item, "[FUNC]") {
 				if i == col.cursor && isActive {
 					style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
@@ -851,11 +856,38 @@ func (m model) renderColumn(col column, isActive bool) string {
 					// Function imports in purple/magenta
 					style = style.Foreground(lipgloss.Color("13"))
 				}
+			} else if strings.HasPrefix(item, "[...more") {
+				// More indicator in gray/dimmed
+				if i == col.cursor && isActive {
+					style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
+				} else if i == col.cursor {
+					style = style.Background(lipgloss.Color("241")).Foreground(lipgloss.Color("15"))
+				} else {
+					style = style.Foreground(lipgloss.Color("8")) // Gray/dimmed
+				}
 			} else {
 				if i == col.cursor && isActive {
 					style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
 				} else if i == col.cursor {
 					style = style.Background(lipgloss.Color("241")).Foreground(lipgloss.Color("15"))
+				}
+				
+				// Handle grayed out additional info
+				if strings.Contains(item, " | ") {
+					parts := strings.SplitN(item, " | ", 2)
+					if len(parts) == 2 {
+						// Style: key (normal) + " | " + description (grayed)
+						mainPart := parts[0]
+						grayPart := " | " + parts[1]
+						
+						if i == col.cursor && isActive {
+							item = mainPart + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(grayPart)
+						} else if i == col.cursor {
+							item = mainPart + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(grayPart)
+						} else {
+							item = mainPart + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(grayPart)
+						}
+					}
 				}
 			}
 			

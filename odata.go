@@ -167,6 +167,27 @@ func (o *ODataService) GetEntities(entitySet string, top int) ([]map[string]inte
 	return nil, fmt.Errorf("failed to parse JSON: %w\nBody: %s", err, string(body))
 }
 
+// GetEntitiesWithCount returns entities and checks if there are more
+func (o *ODataService) GetEntitiesWithCount(entitySet string, top int) (entities []map[string]interface{}, hasMore bool, err error) {
+	// Default to 10 if not specified
+	if top <= 0 {
+		top = 10
+	}
+	// Request one extra to check if there are more
+	entities, err = o.GetEntities(entitySet, top+1)
+	if err != nil {
+		return nil, false, err
+	}
+	
+	// Check if we got more than requested
+	if len(entities) > top {
+		hasMore = true
+		entities = entities[:top] // Return only requested amount
+	}
+	
+	return entities, hasMore, nil
+}
+
 func (o *ODataService) GetEntity(entitySet, id string) (map[string]interface{}, error) {
 	url := fmt.Sprintf("%s/%s(%s)?$format=json", o.baseURL, entitySet, id)
 	
@@ -206,38 +227,49 @@ func (o *ODataService) GetEntity(entitySet, id string) (map[string]interface{}, 
 }
 
 func formatEntityForDisplay(entity map[string]interface{}) string {
-	// Try to find a good display field
-	if name, ok := entity["Name"].(string); ok && name != "" {
-		return name
-	}
-	if title, ok := entity["Title"].(string); ok && title != "" {
-		return title
-	}
-	if desc, ok := entity["Description"].(string); ok && desc != "" {
-		return desc
-	}
-	if id := entity["ID"]; id != nil {
-		return fmt.Sprintf("ID: %v", id)
-	}
-	if id := entity["CategoryID"]; id != nil {
-		return fmt.Sprintf("CategoryID: %v", id)
-	}
-	if id := entity["ProductID"]; id != nil {
-		return fmt.Sprintf("ProductID: %v", id)
-	}
+	// Extract entity type from metadata if available (for future use)
+	_ = entity // avoid unused variable warning
 	
-	// For debugging, show all fields
-	var fields []string
-	for k, v := range entity {
-		if v != nil && !strings.HasPrefix(k, "__") {
-			fields = append(fields, fmt.Sprintf("%s:%v", k, v))
+	// Try to find key fields based on common patterns and entity type
+	var keyValue string
+	var additionalInfo string
+	
+	// Common key field patterns
+	keyFields := []string{"Program", "Class", "Interface", "Package", "Function", 
+		"ID", "Id", "Key", "Code", "Number", 
+		"ProductID", "CategoryID", "CustomerID", "OrderID", "EmployeeID"}
+	
+	// Check for key fields
+	for _, field := range keyFields {
+		if val := entity[field]; val != nil {
+			keyValue = fmt.Sprintf("%v", val)
+			// Look for descriptive fields to append
+			descFields := []string{"Title", "Name", "Description", "Text"}
+			for _, descField := range descFields {
+				if desc := entity[descField]; desc != nil && desc != "" {
+					additionalInfo = fmt.Sprintf(" | %v", desc)
+					break
+				}
+			}
+			break
 		}
 	}
-	if len(fields) > 0 {
-		return fields[0]
+	
+	// If no key found, use first non-metadata field
+	if keyValue == "" {
+		for k, v := range entity {
+			if v != nil && !strings.HasPrefix(k, "__") {
+				keyValue = fmt.Sprintf("%s: %v", k, v)
+				break
+			}
+		}
 	}
 	
-	return fmt.Sprintf("Entity (%d fields)", len(entity))
+	if keyValue == "" {
+		return fmt.Sprintf("Entity (%d fields)", len(entity))
+	}
+	
+	return keyValue + additionalInfo
 }
 
 func formatEntityDetails(entity map[string]interface{}) []string {
