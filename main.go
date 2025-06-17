@@ -98,6 +98,11 @@ type entityDetailMsg struct {
 	entityKey string
 	entity    map[string]interface{}
 }
+type saveSuccessMsg struct {
+	operation string
+	entitySet string
+	message   string
+}
 type errorMsg struct {
 	err     string
 	context string
@@ -166,8 +171,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Handle metadata specially
 				if msg.entitySet == "Metadata" && len(msg.entities) > 0 {
 					if metadataStr, ok := msg.entities[0]["metadata"].(string); ok {
-						// Split metadata into lines for display
-						m.columns[i].items = strings.Split(metadataStr, "\n")
+						// Format metadata for better display with word wrapping
+						m.columns[i].items = formatMetadataForDisplay(metadataStr, m.columns[i].width-4) // Account for borders and padding
 					} else {
 						m.columns[i].items = []string{"Error: Could not parse metadata"}
 					}
@@ -272,6 +277,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case saveSuccessMsg:
+		m.loading = false
+		m.modalEditor = false
+		m.modalContent = nil
+		m.modalCursor = 0
+		m.modalScroll = 0
+		m.modalColCursor = 0
+		m.modalOperation = ""
+		m.logs = append(m.logs, fmt.Sprintf("SUCCESS: %s operation completed - %s", msg.operation, msg.message))
+
 	case entityDetailMsg:
 		m.loading = false
 		m.logs = append(m.logs, fmt.Sprintf("Read detailed entity %s from %s", msg.entityKey, msg.entitySet))
@@ -328,7 +343,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "f2":
 				// Save changes and close modal
-				return m.saveModalChanges(), nil
+				return m.saveModalChanges()
 			case "up", "k":
 				if m.modalCursor > 0 {
 					m.modalCursor--
@@ -1159,16 +1174,9 @@ func (m model) openModalEditor(operation string) model {
 }
 
 // saveModalChanges saves changes from modal editor and closes it
-func (m model) saveModalChanges() model {
-	if !m.modalEditor || m.activeColumn >= len(m.columns) {
-		return m
-	}
-	
-	currentCol := &m.columns[m.activeColumn]
-	if !currentCol.isDetails || len(currentCol.entities) == 0 {
-		m.logs = append(m.logs, "No entity data to save")
-		m.modalEditor = false
-		return m
+func (m model) saveModalChanges() (tea.Model, tea.Cmd) {
+	if !m.modalEditor {
+		return m, nil
 	}
 
 	// Try to parse the edited JSON
@@ -1176,33 +1184,90 @@ func (m model) saveModalChanges() model {
 	var updatedEntity map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonContent), &updatedEntity); err != nil {
 		m.logs = append(m.logs, fmt.Sprintf("Invalid JSON: %v", err))
-		return m
+		return m, nil
 	}
 
-	// Update the stored entity
-	currentCol.entities[0] = updatedEntity
+	// Determine the entity set name
+	var entitySetName string
+	var entityKey string
 	
-	// Update the display
-	jsonData, err := json.MarshalIndent(updatedEntity, "", "  ")
-	if err != nil {
-		m.logs = append(m.logs, fmt.Sprintf("Error formatting JSON: %v", err))
-		m.modalEditor = false
-		return m
+	// For create operations, we need to find the current entity set
+	if m.modalOperation == "create" {
+		// Look for an entity set column
+		for _, col := range m.columns {
+			if col.title != "OData Services" && col.title != "EntitySets" && col.title != "Details" && col.title != "Metadata" {
+				entitySetName = col.title
+				break
+			}
+		}
+		if entitySetName == "" {
+			m.logs = append(m.logs, "Cannot determine entity set for create operation")
+			return m, nil
+		}
+	} else {
+		// For update/copy, we need the current entity details
+		if m.activeColumn >= len(m.columns) {
+			m.logs = append(m.logs, "No active column for update operation")
+			return m, nil
+		}
+		
+		currentCol := m.columns[m.activeColumn]
+		if !currentCol.isDetails || len(currentCol.entities) == 0 {
+			m.logs = append(m.logs, "No entity data for update operation")
+			return m, nil
+		}
+
+		// Find the entity set from the column before the details column
+		if m.activeColumn > 0 {
+			entitySetName = m.columns[m.activeColumn-1].title
+		}
+		
+		// For update operations, extract the key from the original entity
+		if m.modalOperation == "update" {
+			entityKey = extractEntityKey(currentCol.entities[0])
+			if entityKey == "" {
+				m.logs = append(m.logs, "Cannot determine entity key for update operation")
+				return m, nil
+			}
+		}
 	}
-	
-	currentCol.items = strings.Split(string(jsonData), "\n")
-	currentCol.cursor = 0
-	currentCol.scrollOffset = 0
-	
-	// Close modal
-	m.modalEditor = false
-	m.modalContent = nil
-	m.modalCursor = 0
-	m.modalScroll = 0
-	
-	m.logs = append(m.logs, "Changes saved locally (not persisted to server)")
-	
-	return m
+
+	if entitySetName == "" {
+		m.logs = append(m.logs, "Cannot determine entity set name")
+		return m, nil
+	}
+
+	m.loading = true
+	m.logs = append(m.logs, fmt.Sprintf("Performing %s operation on %s...", m.modalOperation, entitySetName))
+
+	// Return command to perform OData operation
+	operation := m.modalOperation
+	return m, func() tea.Msg {
+		switch operation {
+		case "create", "copy":
+			err := m.odata.CreateEntity(entitySetName, updatedEntity)
+			if err != nil {
+				return errorMsg{err: err.Error(), context: fmt.Sprintf("%s operation", operation)}
+			}
+			return saveSuccessMsg{
+				operation: operation,
+				entitySet: entitySetName,
+				message:   "Entity created successfully",
+			}
+		case "update":
+			err := m.odata.UpdateEntity(entitySetName, entityKey, updatedEntity)
+			if err != nil {
+				return errorMsg{err: err.Error(), context: fmt.Sprintf("%s operation", operation)}
+			}
+			return saveSuccessMsg{
+				operation: operation,
+				entitySet: entitySetName,
+				message:   "Entity updated successfully",
+			}
+		default:
+			return errorMsg{err: "Unknown operation: " + operation, context: "saveModalChanges"}
+		}
+	}
 }
 
 func (m model) View() string {
@@ -1579,6 +1644,84 @@ func (m model) renderColumn(col column, isActive bool) string {
 			content,
 		),
 	)
+}
+
+// formatMetadataForDisplay formats XML metadata with proper line wrapping and formatting
+func formatMetadataForDisplay(metadata string, maxWidth int) []string {
+	if maxWidth < 20 {
+		maxWidth = 80 // Reasonable default
+	}
+	
+	var lines []string
+	
+	// First, try to format as readable XML by adding line breaks at logical points
+	formatted := metadata
+	formatted = strings.ReplaceAll(formatted, "><", ">\n<")
+	formatted = strings.ReplaceAll(formatted, "/>", "/>\n")
+	
+	// Split into initial lines
+	initialLines := strings.Split(formatted, "\n")
+	
+	// Process each line for word wrapping
+	for _, line := range initialLines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		
+		// If line is shorter than max width, use as-is
+		if len(line) <= maxWidth {
+			lines = append(lines, line)
+			continue
+		}
+		
+		// Word wrap long lines
+		wrapped := wrapLine(line, maxWidth)
+		lines = append(lines, wrapped...)
+	}
+	
+	return lines
+}
+
+// wrapLine wraps a single line to fit within maxWidth
+func wrapLine(line string, maxWidth int) []string {
+	if len(line) <= maxWidth {
+		return []string{line}
+	}
+	
+	var wrapped []string
+	
+	for len(line) > maxWidth {
+		// Find a good break point (space, tag boundary, etc.)
+		breakPoint := maxWidth
+		
+		// Look for a space or tag boundary within the last 20 characters
+		searchStart := maxWidth - 20
+		if searchStart < 0 {
+			searchStart = 0
+		}
+		
+		for i := maxWidth - 1; i >= searchStart; i-- {
+			if line[i] == ' ' || line[i] == '>' || line[i] == '<' {
+				breakPoint = i + 1
+				break
+			}
+		}
+		
+		// If no good break point found, just break at maxWidth
+		if breakPoint == maxWidth && maxWidth < len(line) {
+			breakPoint = maxWidth
+		}
+		
+		wrapped = append(wrapped, line[:breakPoint])
+		line = strings.TrimSpace(line[breakPoint:])
+	}
+	
+	if len(line) > 0 {
+		wrapped = append(wrapped, line)
+	}
+	
+	return wrapped
 }
 
 func main() {

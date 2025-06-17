@@ -358,3 +358,89 @@ func (c EntityCapabilities) String() string {
 	}
 	return fmt.Sprintf("[%s]", strings.Join(caps, ""))
 }
+
+// CreateEntity creates a new entity in the specified entity set
+func (o *ODataService) CreateEntity(entitySet string, entity map[string]interface{}) error {
+	url := fmt.Sprintf("%s/%s", o.baseURL, entitySet)
+	
+	// Remove metadata fields that shouldn't be sent
+	cleanEntity := make(map[string]interface{})
+	for k, v := range entity {
+		if !strings.HasPrefix(k, "__") {
+			cleanEntity[k] = v
+		}
+	}
+	
+	jsonData, err := json.Marshal(cleanEntity)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entity: %w", err)
+	}
+	
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	
+	if o.username != "" && o.password != "" {
+		req.SetBasicAuth(o.username, o.password)
+	}
+	
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to create entity: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	
+	return nil
+}
+
+// UpdateEntity updates an existing entity
+func (o *ODataService) UpdateEntity(entitySet, entityKey string, entity map[string]interface{}) error {
+	url := fmt.Sprintf("%s/%s(%s)", o.baseURL, entitySet, entityKey)
+	
+	// Remove metadata fields that shouldn't be sent
+	cleanEntity := make(map[string]interface{})
+	for k, v := range entity {
+		if !strings.HasPrefix(k, "__") {
+			cleanEntity[k] = v
+		}
+	}
+	
+	jsonData, err := json.Marshal(cleanEntity)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entity: %w", err)
+	}
+	
+	req, err := http.NewRequest("PUT", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	
+	if o.username != "" && o.password != "" {
+		req.SetBasicAuth(o.username, o.password)
+	}
+	
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update entity: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	
+	return nil
+}
