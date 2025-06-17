@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +23,13 @@ type ODataService struct {
 // OData V2 response structures
 type ODataV2Response struct {
 	D []map[string]interface{} `json:"d"`
+}
+
+// SAP OData V2 response structure (with results wrapper)
+type SAPODataV2Response struct {
+	D struct {
+		Results []map[string]interface{} `json:"results"`
+	} `json:"d"`
 }
 
 func NewODataService() *ODataService {
@@ -48,18 +56,75 @@ func NewODataServiceWithAuth(url, username, password string) *ODataService {
 }
 
 func (o *ODataService) GetEntitySets() ([]string, error) {
-	// For V2, we'll use hardcoded entity sets since metadata parsing is complex
-	return []string{
-		"Categories",
-		"Products", 
-		"Suppliers",
-		"Persons",
-		"Advertisements",
-		"ProductDetails",
-	}, nil
+	// First try to get metadata and parse entity sets
+	metadataURL := strings.TrimSuffix(o.baseURL, "/") + "/$metadata"
+	
+	req, err := http.NewRequest("GET", metadataURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metadata request: %w", err)
+	}
+	
+	if o.username != "" && o.password != "" {
+		req.SetBasicAuth(o.username, o.password)
+	}
+	
+	resp, err := o.client.Do(req)
+	if err != nil {
+		// Fallback to hardcoded entity sets for demo services
+		return []string{"Categories", "Products", "Suppliers", "Persons", "Advertisements", "ProductDetails"}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Fallback to hardcoded entity sets
+		return []string{"Categories", "Products", "Suppliers", "Persons", "Advertisements", "ProductDetails"}, nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	// Parse entity sets from metadata using regex (simple approach)
+	entitySets := parseEntitySetsFromMetadata(string(body))
+	if len(entitySets) == 0 {
+		// Fallback to hardcoded entity sets
+		return []string{"Categories", "Products", "Suppliers", "Persons", "Advertisements", "ProductDetails"}, nil
+	}
+
+
+	return entitySets, nil
+}
+
+func parseEntitySetsFromMetadata(metadata string) []string {
+	// Use regex to find EntitySet elements
+	re := regexp.MustCompile(`<EntitySet[^>]+Name="([^"]+)"`)
+	matches := re.FindAllStringSubmatch(metadata, -1)
+	
+	var entitySets []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			entitySets = append(entitySets, match[1])
+		}
+	}
+	
+	// Add function imports with [FUNC] prefix
+	funcRe := regexp.MustCompile(`<FunctionImport[^>]+Name="([^"]+)"`)
+	funcMatches := funcRe.FindAllStringSubmatch(metadata, -1)
+	for _, match := range funcMatches {
+		if len(match) > 1 {
+			entitySets = append(entitySets, "[FUNC] "+match[1])
+		}
+	}
+	
+	return entitySets
 }
 
 func (o *ODataService) GetEntities(entitySet string, top int) ([]map[string]interface{}, error) {
+	// Default to 10 if not specified
+	if top <= 0 {
+		top = 10
+	}
 	url := fmt.Sprintf("%s/%s?$top=%d&$format=json", o.baseURL, entitySet, top)
 	
 	req, err := http.NewRequest("GET", url, nil)
@@ -87,12 +152,19 @@ func (o *ODataService) GetEntities(entitySet string, top int) ([]map[string]inte
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Try parsing as standard OData V2 first
 	var odataResp ODataV2Response
-	if err := json.Unmarshal(body, &odataResp); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w\nBody: %s", err, string(body))
+	if err := json.Unmarshal(body, &odataResp); err == nil && len(odataResp.D) > 0 {
+		return odataResp.D, nil
 	}
 
-	return odataResp.D, nil
+	// Try parsing as SAP OData V2 (with results wrapper)
+	var sapResp SAPODataV2Response
+	if err := json.Unmarshal(body, &sapResp); err == nil {
+		return sapResp.D.Results, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse JSON: %w\nBody: %s", err, string(body))
 }
 
 func (o *ODataService) GetEntity(entitySet, id string) (map[string]interface{}, error) {

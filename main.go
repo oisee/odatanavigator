@@ -14,6 +14,7 @@ type column struct {
 	title     string
 	items     []string
 	cursor    int
+	scrollOffset int                   // For large content scrolling
 	width     int
 	height    int
 	focused   bool
@@ -105,7 +106,7 @@ func loadEntitySets(odata *ODataService) tea.Cmd {
 
 func loadEntities(odata *ODataService, entitySet string) tea.Cmd {
 	return func() tea.Msg {
-		entities, err := odata.GetEntities(entitySet, 50)
+		entities, err := odata.GetEntities(entitySet, 10) // Default to 10 entities
 		if err != nil {
 			return errorMsg{err: err.Error(), context: fmt.Sprintf("loadEntities(%s)", entitySet)}
 		}
@@ -231,10 +232,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.cursor > 0 {
-					col.cursor--
-					// Update preview when cursor moves
-					return m, m.updatePreview()
+				if col.isDetails {
+					// In details view, scroll up if needed, otherwise move cursor
+					if col.cursor > 0 {
+						col.cursor--
+						// Ensure cursor is visible in viewport
+						if col.cursor < col.scrollOffset {
+							col.scrollOffset = col.cursor
+						}
+					}
+				} else {
+					if col.cursor > 0 {
+						col.cursor--
+						// Update preview when cursor moves
+						return m, m.updatePreview()
+					}
 				}
 			}
 
@@ -246,10 +258,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.cursor < len(col.items)-1 {
-					col.cursor++
-					// Update preview when cursor moves
-					return m, m.updatePreview()
+				if col.isDetails {
+					// In details view, scroll down if needed, otherwise move cursor
+					if col.cursor < len(col.items)-1 {
+						col.cursor++
+						// Ensure cursor is visible in viewport
+						visibleHeight := col.height - 2 // Account for borders
+						if col.cursor >= col.scrollOffset+visibleHeight {
+							col.scrollOffset = col.cursor - visibleHeight + 1
+						}
+					}
+				} else {
+					if col.cursor < len(col.items)-1 {
+						col.cursor++
+						// Update preview when cursor moves
+						return m, m.updatePreview()
+					}
 				}
 			}
 
@@ -285,6 +309,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// TODO: Delete entity
 		case "f9":
 			m.showLogs = !m.showLogs
+			
+		case "pgup":
+			if m.activeColumn < len(m.columns) {
+				col := &m.columns[m.activeColumn]
+				if col.isDetails {
+					pageSize := col.height - 2 // Account for borders
+					newCursor := col.cursor - pageSize
+					if newCursor < 0 {
+						newCursor = 0
+					}
+					col.cursor = newCursor
+					col.scrollOffset = newCursor
+				}
+			}
+			
+		case "pgdown":
+			if m.activeColumn < len(m.columns) {
+				col := &m.columns[m.activeColumn]
+				if col.isDetails {
+					pageSize := col.height - 2
+					newCursor := col.cursor + pageSize
+					if newCursor >= len(col.items) {
+						newCursor = len(col.items) - 1
+					}
+					col.cursor = newCursor
+					visibleHeight := col.height - 2
+					if col.cursor >= col.scrollOffset+visibleHeight {
+						col.scrollOffset = col.cursor - visibleHeight + 1
+					}
+				}
+			}
+			
+		case "home":
+			if m.activeColumn < len(m.columns) {
+				col := &m.columns[m.activeColumn]
+				if col.isDetails {
+					col.cursor = 0
+					col.scrollOffset = 0
+				}
+			}
+			
+		case "end":
+			if m.activeColumn < len(m.columns) {
+				col := &m.columns[m.activeColumn]
+				if col.isDetails && len(col.items) > 0 {
+					col.cursor = len(col.items) - 1
+					visibleHeight := col.height - 2
+					if len(col.items) > visibleHeight {
+						col.scrollOffset = len(col.items) - visibleHeight
+					} else {
+						col.scrollOffset = 0
+					}
+				}
+			}
 		}
 	}
 
@@ -510,7 +588,7 @@ func (m model) updatePreview() tea.Cmd {
 		if m.odata != nil {
 			entitySetName := strings.Split(selectedItem, " [")[0]
 			return func() tea.Msg {
-				entities, err := m.odata.GetEntities(entitySetName, 20)
+				entities, err := m.odata.GetEntities(entitySetName, 10) // Default to 10 for preview
 				if err != nil {
 					return previewMsg{errorMsg: err.Error()}
 				}
@@ -758,13 +836,43 @@ func (m model) renderColumn(col column, isActive bool) string {
 		}
 	} else {
 		// Normal display mode
-		for i, item := range col.items {
+		// Calculate viewport for scrolling
+		startIdx := 0
+		endIdx := len(col.items)
+		
+		if col.isDetails && col.height > 2 {
+			// For details columns, implement viewport scrolling
+			visibleHeight := col.height - 2 // Account for borders
+			startIdx = col.scrollOffset
+			endIdx = startIdx + visibleHeight
+			if endIdx > len(col.items) {
+				endIdx = len(col.items)
+			}
+		}
+		
+		for i := startIdx; i < endIdx; i++ {
+			if i >= len(col.items) {
+				break
+			}
+			item := col.items[i]
 			style := lipgloss.NewStyle().Padding(0, 1)
 			
-			if i == col.cursor && isActive {
-				style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
-			} else if i == col.cursor {
-				style = style.Background(lipgloss.Color("241")).Foreground(lipgloss.Color("15"))
+			// Color function imports differently
+			if strings.HasPrefix(item, "[FUNC]") {
+				if i == col.cursor && isActive {
+					style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
+				} else if i == col.cursor {
+					style = style.Background(lipgloss.Color("241")).Foreground(lipgloss.Color("15"))
+				} else {
+					// Function imports in purple/magenta
+					style = style.Foreground(lipgloss.Color("13"))
+				}
+			} else {
+				if i == col.cursor && isActive {
+					style = style.Background(lipgloss.Color("99")).Foreground(lipgloss.Color("0"))
+				} else if i == col.cursor {
+					style = style.Background(lipgloss.Color("241")).Foreground(lipgloss.Color("15"))
+				}
 			}
 			
 			items = append(items, style.Render(item))
@@ -783,10 +891,16 @@ func (m model) renderColumn(col column, isActive bool) string {
 		columnStyle = columnStyle.BorderForeground(lipgloss.Color("99"))
 	}
 
-	// Modify title for edit mode
+	// Modify title for edit mode and add scroll indicator
 	title := col.title
 	if m.editMode && isActive && col.isDetails {
 		title = "[EDIT] " + col.title
+	} else if col.isDetails && len(col.items) > col.height-2 {
+		// Add scroll indicator for large content
+		totalLines := len(col.items)
+		visibleHeight := col.height - 2
+		currentPos := col.scrollOffset + 1
+		title = fmt.Sprintf("%s (%d-%d/%d)", col.title, currentPos, currentPos+visibleHeight-1, totalLines)
 	}
 	
 	return columnStyle.Render(
