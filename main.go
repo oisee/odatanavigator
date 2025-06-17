@@ -232,19 +232,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails {
-					// In details view, scroll up if needed, otherwise move cursor
-					if col.cursor > 0 {
-						col.cursor--
-						// Ensure cursor is visible in viewport
-						if col.cursor < col.scrollOffset {
-							col.scrollOffset = col.cursor
-						}
+				if col.cursor > 0 {
+					col.cursor--
+					// Ensure cursor is visible in viewport for all columns
+					if col.cursor < col.scrollOffset {
+						col.scrollOffset = col.cursor
 					}
-				} else {
-					if col.cursor > 0 {
-						col.cursor--
-						// Update preview when cursor moves
+					// Update preview when cursor moves (except in details view)
+					if !col.isDetails {
 						return m, m.updatePreview()
 					}
 				}
@@ -258,20 +253,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails {
-					// In details view, scroll down if needed, otherwise move cursor
-					if col.cursor < len(col.items)-1 {
-						col.cursor++
-						// Ensure cursor is visible in viewport
-						visibleHeight := col.height - 2 // Account for borders
-						if col.cursor >= col.scrollOffset+visibleHeight {
-							col.scrollOffset = col.cursor - visibleHeight + 1
-						}
+				if col.cursor < len(col.items)-1 {
+					col.cursor++
+					// Ensure cursor is visible in viewport for all columns
+					visibleHeight := col.height - 2 // Account for borders
+					if col.cursor >= col.scrollOffset+visibleHeight {
+						col.scrollOffset = col.cursor - visibleHeight + 1
 					}
-				} else {
-					if col.cursor < len(col.items)-1 {
-						col.cursor++
-						// Update preview when cursor moves
+					// Update preview when cursor moves (except in details view)
+					if !col.isDetails {
 						return m, m.updatePreview()
 					}
 				}
@@ -313,47 +303,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup":
 			if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails {
-					pageSize := col.height - 2 // Account for borders
-					newCursor := col.cursor - pageSize
-					if newCursor < 0 {
-						newCursor = 0
-					}
-					col.cursor = newCursor
-					col.scrollOffset = newCursor
+				pageSize := col.height - 2 // Account for borders
+				newCursor := col.cursor - pageSize
+				if newCursor < 0 {
+					newCursor = 0
 				}
+				col.cursor = newCursor
+				col.scrollOffset = newCursor
 			}
 			
 		case "pgdown":
 			if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails {
-					pageSize := col.height - 2
-					newCursor := col.cursor + pageSize
-					if newCursor >= len(col.items) {
-						newCursor = len(col.items) - 1
-					}
-					col.cursor = newCursor
-					visibleHeight := col.height - 2
-					if col.cursor >= col.scrollOffset+visibleHeight {
-						col.scrollOffset = col.cursor - visibleHeight + 1
-					}
+				pageSize := col.height - 2
+				newCursor := col.cursor + pageSize
+				if newCursor >= len(col.items) {
+					newCursor = len(col.items) - 1
+				}
+				col.cursor = newCursor
+				visibleHeight := col.height - 2
+				if col.cursor >= col.scrollOffset+visibleHeight {
+					col.scrollOffset = col.cursor - visibleHeight + 1
 				}
 			}
 			
 		case "home":
 			if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails {
-					col.cursor = 0
-					col.scrollOffset = 0
-				}
+				col.cursor = 0
+				col.scrollOffset = 0
 			}
 			
 		case "end":
 			if m.activeColumn < len(m.columns) {
 				col := &m.columns[m.activeColumn]
-				if col.isDetails && len(col.items) > 0 {
+				if len(col.items) > 0 {
 					col.cursor = len(col.items) - 1
 					visibleHeight := col.height - 2
 					if len(col.items) > visibleHeight {
@@ -836,12 +820,12 @@ func (m model) renderColumn(col column, isActive bool) string {
 		}
 	} else {
 		// Normal display mode
-		// Calculate viewport for scrolling
+		// Calculate viewport for scrolling on all columns
 		startIdx := 0
 		endIdx := len(col.items)
 		
-		if col.isDetails && col.height > 2 {
-			// For details columns, implement viewport scrolling
+		if col.height > 2 {
+			// Implement viewport scrolling for all columns
 			visibleHeight := col.height - 2 // Account for borders
 			startIdx = col.scrollOffset
 			endIdx = startIdx + visibleHeight
@@ -895,12 +879,17 @@ func (m model) renderColumn(col column, isActive bool) string {
 	title := col.title
 	if m.editMode && isActive && col.isDetails {
 		title = "[EDIT] " + col.title
-	} else if col.isDetails && len(col.items) > col.height-2 {
-		// Add scroll indicator for large content
+	}
+	// Add scroll indicator for any column with large content
+	if len(col.items) > col.height-2 && col.height > 2 {
 		totalLines := len(col.items)
 		visibleHeight := col.height - 2
 		currentPos := col.scrollOffset + 1
-		title = fmt.Sprintf("%s (%d-%d/%d)", col.title, currentPos, currentPos+visibleHeight-1, totalLines)
+		endPos := currentPos + visibleHeight - 1
+		if endPos > totalLines {
+			endPos = totalLines
+		}
+		title = fmt.Sprintf("%s (%d-%d/%d)", col.title, currentPos, endPos, totalLines)
 	}
 	
 	return columnStyle.Render(
