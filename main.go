@@ -85,6 +85,11 @@ type previewMsg struct {
 	data        interface{}
 	errorMsg    string
 }
+type entityDetailMsg struct {
+	entitySet string
+	entityKey string
+	entity    map[string]interface{}
+}
 type errorMsg struct {
 	err     string
 	context string
@@ -211,6 +216,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case entityDetailMsg:
+		m.loading = false
+		m.logs = append(m.logs, fmt.Sprintf("Read detailed entity %s from %s", msg.entityKey, msg.entitySet))
+		
+		// Update the details column with the detailed entity
+		for i := range m.columns {
+			if m.columns[i].title == "Details" && m.columns[i].isDetails {
+				// Replace the stored entity with the detailed one
+				m.columns[i].entities = []map[string]interface{}{msg.entity}
+				
+				// Update JSON display
+				jsonData, err := json.MarshalIndent(msg.entity, "", "  ")
+				if err != nil {
+					m.columns[i].items = []string{fmt.Sprintf("Error formatting JSON: %v", err)}
+				} else {
+					m.columns[i].items = strings.Split(string(jsonData), "\n")
+				}
+				
+				// Reset cursor and scroll
+				m.columns[i].cursor = 0
+				m.columns[i].scrollOffset = 0
+				break
+			}
+		}
+
 	case errorMsg:
 		m.loading = false
 		m.logs = append(m.logs, fmt.Sprintf("ERROR [%s]: %s", msg.context, msg.err))
@@ -290,7 +320,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f2":
 			// TODO: Create entity
 		case "f3":
-			// TODO: Read entity details
+			return m.readEntityDetails()
 		case "f4":
 			// TODO: Update entity
 		case "f5":
@@ -541,6 +571,77 @@ func (m model) goBack() model {
 		m.updateColumnSizes()
 	}
 	return m
+}
+
+// readEntityDetails reads the full details of the currently selected entity
+func (m model) readEntityDetails() (tea.Model, tea.Cmd) {
+	// Only works when we're viewing entities (not in details view)
+	if m.activeColumn < 0 || m.activeColumn >= len(m.columns) {
+		return m, nil
+	}
+	
+	currentCol := m.columns[m.activeColumn]
+	if currentCol.isDetails || len(currentCol.entities) == 0 || currentCol.cursor >= len(currentCol.entities) {
+		m.logs = append(m.logs, "F3: Select an entity in the entity list to read details")
+		return m, nil
+	}
+	
+	// Get the selected entity
+	selectedEntity := currentCol.entities[currentCol.cursor]
+	entitySetName := currentCol.title
+	
+	// Extract the key value(s) from the entity
+	entityKey := extractEntityKey(selectedEntity)
+	if entityKey == "" {
+		m.logs = append(m.logs, "F3: Could not determine entity key for detailed read")
+		return m, nil
+	}
+	
+	m.loading = true
+	m.logs = append(m.logs, fmt.Sprintf("Reading detailed entity %s from %s...", entityKey, entitySetName))
+	
+	return m, func() tea.Msg {
+		entity, err := m.odata.GetEntity(entitySetName, entityKey)
+		if err != nil {
+			return errorMsg{err: err.Error(), context: fmt.Sprintf("readEntity(%s, %s)", entitySetName, entityKey)}
+		}
+		return entityDetailMsg{entitySet: entitySetName, entityKey: entityKey, entity: entity}
+	}
+}
+
+// extractEntityKey extracts the primary key value from an entity
+func extractEntityKey(entity map[string]interface{}) string {
+	// Common key field patterns
+	keyFields := []string{"Program", "Class", "Interface", "Package", "Function", 
+		"ID", "Id", "Key", "Code", "Number", 
+		"ProductID", "CategoryID", "CustomerID", "OrderID", "EmployeeID"}
+	
+	// Check for key fields
+	for _, field := range keyFields {
+		if val := entity[field]; val != nil {
+			// Format the key value for OData URL
+			if str, ok := val.(string); ok {
+				// String keys need to be quoted
+				return fmt.Sprintf("'%s'", str)
+			} else {
+				// Numeric keys don't need quotes
+				return fmt.Sprintf("%v", val)
+			}
+		}
+	}
+	
+	// Fallback: look for any field that might be a key
+	for k, v := range entity {
+		if v != nil && !strings.HasPrefix(k, "__") && !strings.Contains(strings.ToLower(k), "date") {
+			if str, ok := v.(string); ok && str != "" {
+				return fmt.Sprintf("'%s'", str)
+			} else if num := v; num != nil {
+				return fmt.Sprintf("%v", num)
+			}
+		}
+	}
+	
+	return ""
 }
 
 // updatePreview generates a preview based on current cursor position
