@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -41,8 +43,10 @@ type model struct {
 	previewLoading bool
 	modalEditor    bool    // Modal editor mode
 	modalContent   []string // Content being edited in modal
-	modalCursor    int     // Cursor position in modal
+	modalCursor    int     // Cursor position in modal (line)
 	modalScroll    int     // Scroll offset in modal
+	modalColCursor int     // Column cursor position within line
+	modalOperation string  // Type of operation: "create", "update", "copy"
 }
 
 func initialModel() model {
@@ -134,13 +138,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i := range m.columns {
 			if m.columns[i].title == "EntitySets" {
 				m.columns[i].items = []string{}
+				
+				// Add $metadata as first entry
+				m.columns[i].items = append(m.columns[i].items, "$metadata [META]")
+				
 				for _, entitySet := range msg {
 					capabilities := GetEntitySetCapabilities(entitySet)
 					displayText := fmt.Sprintf("%s %s", entitySet, capabilities.String())
 					m.columns[i].items = append(m.columns[i].items, displayText)
 				}
-				if len(m.columns[i].items) == 0 {
-					m.columns[i].items = []string{"(No entity sets)"}
+				if len(m.columns[i].items) == 1 { // Only $metadata
+					m.columns[i].items = append(m.columns[i].items, "(No entity sets)")
 				}
 				break
 			}
@@ -152,18 +160,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		
 		// Find the column with matching title
 		for i := range m.columns {
-			if m.columns[i].title == msg.entitySet {
+			if m.columns[i].title == msg.entitySet || m.columns[i].title == "Metadata" {
 				m.columns[i].entities = msg.entities
-				m.columns[i].items = []string{}
-				for _, entity := range msg.entities {
-					m.columns[i].items = append(m.columns[i].items, formatEntityForDisplay(entity))
-				}
-				// Add "more" indicator if truncated
-				if msg.hasMore {
-					m.columns[i].items = append(m.columns[i].items, "[...more items]")
-				}
-				if len(m.columns[i].items) == 0 {
-					m.columns[i].items = []string{"(No items)"}
+				
+				// Handle metadata specially
+				if msg.entitySet == "Metadata" && len(msg.entities) > 0 {
+					if metadataStr, ok := msg.entities[0]["metadata"].(string); ok {
+						// Split metadata into lines for display
+						m.columns[i].items = strings.Split(metadataStr, "\n")
+					} else {
+						m.columns[i].items = []string{"Error: Could not parse metadata"}
+					}
+				} else {
+					// Regular entity list
+					m.columns[i].items = []string{}
+					for _, entity := range msg.entities {
+						m.columns[i].items = append(m.columns[i].items, formatEntityForDisplay(entity))
+					}
+					// Add "more" indicator if truncated
+					if msg.hasMore {
+						m.columns[i].items = append(m.columns[i].items, "[...more items]")
+					}
+					if len(m.columns[i].items) == 0 {
+						m.columns[i].items = []string{"(No items)"}
+					}
 				}
 				break
 			}
@@ -211,7 +231,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							fmt.Sprintf("Name: %v", funcData["name"]),
 							fmt.Sprintf("Type: %v", funcData["type"]),
 							"",
+							fmt.Sprintf("Description: %v", funcData["description"]),
+							"",
+							fmt.Sprintf("Parameters: %v", funcData["parameters"]),
+							"",
 							fmt.Sprintf("%v", funcData["note"]),
+						}
+					}
+				case "metadata":
+					if metaData, ok := msg.data.(map[string]interface{}); ok {
+						m.previewColumn.title = "Metadata Preview"
+						m.previewColumn.items = []string{
+							fmt.Sprintf("Type: %v", metaData["type"]),
+							"",
+							fmt.Sprintf("URL: %v", metaData["url"]),
+							"",
+							fmt.Sprintf("%v", metaData["note"]),
+							"",
+							"Contains:",
+							"• Entity Types and Sets",
+							"• Function Imports",
+							"• Complex Types",
+							"• Associations",
+							"• Service Operations",
 						}
 					}
 				case "navigation":
@@ -280,6 +322,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modalContent = nil
 				m.modalCursor = 0
 				m.modalScroll = 0
+				m.modalColCursor = 0
+				m.modalOperation = ""
 				m.logs = append(m.logs, "Modal editor cancelled")
 				return m, nil
 			case "f2":
@@ -291,6 +335,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.modalCursor < m.modalScroll {
 						m.modalScroll = m.modalCursor
 					}
+					// Adjust column cursor if new line is shorter
+					if m.modalCursor < len(m.modalContent) && m.modalColCursor > len(m.modalContent[m.modalCursor]) {
+						m.modalColCursor = len(m.modalContent[m.modalCursor])
+					}
 				}
 			case "down", "j":
 				if m.modalCursor < len(m.modalContent)-1 {
@@ -298,6 +346,91 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					modalHeight := int(float64(m.height) * 0.95) - 4
 					if m.modalCursor >= m.modalScroll+modalHeight {
 						m.modalScroll = m.modalCursor - modalHeight + 1
+					}
+					// Adjust column cursor if new line is shorter
+					if m.modalCursor < len(m.modalContent) && m.modalColCursor > len(m.modalContent[m.modalCursor]) {
+						m.modalColCursor = len(m.modalContent[m.modalCursor])
+					}
+				}
+			case "left":
+				if m.modalColCursor > 0 {
+					m.modalColCursor--
+				} else if m.modalCursor > 0 {
+					// Move to end of previous line
+					m.modalCursor--
+					if m.modalCursor < len(m.modalContent) {
+						m.modalColCursor = len(m.modalContent[m.modalCursor])
+					}
+				}
+			case "right":
+				if m.modalCursor < len(m.modalContent) && m.modalColCursor < len(m.modalContent[m.modalCursor]) {
+					m.modalColCursor++
+				} else if m.modalCursor < len(m.modalContent)-1 {
+					// Move to beginning of next line
+					m.modalCursor++
+					m.modalColCursor = 0
+				}
+			case "enter":
+				// Insert new line
+				if m.modalCursor < len(m.modalContent) {
+					currentLine := m.modalContent[m.modalCursor]
+					beforeCursor := currentLine[:m.modalColCursor]
+					afterCursor := currentLine[m.modalColCursor:]
+					
+					// Replace current line with part before cursor
+					m.modalContent[m.modalCursor] = beforeCursor
+					
+					// Insert new line with part after cursor
+					newContent := make([]string, len(m.modalContent)+1)
+					copy(newContent[:m.modalCursor+1], m.modalContent[:m.modalCursor+1])
+					newContent[m.modalCursor+1] = afterCursor
+					copy(newContent[m.modalCursor+2:], m.modalContent[m.modalCursor+1:])
+					m.modalContent = newContent
+					
+					// Move to next line, beginning
+					m.modalCursor++
+					m.modalColCursor = 0
+				}
+			case "backspace":
+				if m.modalColCursor > 0 {
+					// Delete character before cursor
+					if m.modalCursor < len(m.modalContent) {
+						line := m.modalContent[m.modalCursor]
+						m.modalContent[m.modalCursor] = line[:m.modalColCursor-1] + line[m.modalColCursor:]
+						m.modalColCursor--
+					}
+				} else if m.modalCursor > 0 {
+					// Join with previous line
+					if m.modalCursor < len(m.modalContent) {
+						prevLine := m.modalContent[m.modalCursor-1]
+						currentLine := m.modalContent[m.modalCursor]
+						m.modalColCursor = len(prevLine)
+						m.modalContent[m.modalCursor-1] = prevLine + currentLine
+						
+						// Remove current line
+						newContent := make([]string, len(m.modalContent)-1)
+						copy(newContent[:m.modalCursor], m.modalContent[:m.modalCursor])
+						copy(newContent[m.modalCursor:], m.modalContent[m.modalCursor+1:])
+						m.modalContent = newContent
+						m.modalCursor--
+					}
+				}
+			case "delete":
+				if m.modalCursor < len(m.modalContent) {
+					line := m.modalContent[m.modalCursor]
+					if m.modalColCursor < len(line) {
+						// Delete character at cursor
+						m.modalContent[m.modalCursor] = line[:m.modalColCursor] + line[m.modalColCursor+1:]
+					} else if m.modalCursor < len(m.modalContent)-1 {
+						// Join with next line
+						nextLine := m.modalContent[m.modalCursor+1]
+						m.modalContent[m.modalCursor] = line + nextLine
+						
+						// Remove next line
+						newContent := make([]string, len(m.modalContent)-1)
+						copy(newContent[:m.modalCursor+1], m.modalContent[:m.modalCursor+1])
+						copy(newContent[m.modalCursor+1:], m.modalContent[m.modalCursor+2:])
+						m.modalContent = newContent
 					}
 				}
 			case "pgup":
@@ -319,17 +452,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.modalScroll = m.modalCursor - modalHeight + 1
 				}
 			case "home":
-				m.modalCursor = 0
-				m.modalScroll = 0
+				m.modalColCursor = 0
 			case "end":
+				if m.modalCursor < len(m.modalContent) {
+					m.modalColCursor = len(m.modalContent[m.modalCursor])
+				}
+			case "ctrl+home":
+				m.modalCursor = 0
+				m.modalColCursor = 0
+				m.modalScroll = 0
+			case "ctrl+end":
 				if len(m.modalContent) > 0 {
 					m.modalCursor = len(m.modalContent) - 1
+					m.modalColCursor = len(m.modalContent[m.modalCursor])
 					modalHeight := int(float64(m.height) * 0.95) - 4
 					if len(m.modalContent) > modalHeight {
 						m.modalScroll = len(m.modalContent) - modalHeight
 					} else {
 						m.modalScroll = 0
 					}
+				}
+			default:
+				// Handle regular character input
+				if len(msg.String()) == 1 {
+					char := msg.String()
+					if m.modalCursor >= len(m.modalContent) {
+						// Add new line if needed
+						m.modalContent = append(m.modalContent, "")
+					}
+					
+					line := m.modalContent[m.modalCursor]
+					// Insert character at cursor position
+					m.modalContent[m.modalCursor] = line[:m.modalColCursor] + char + line[m.modalColCursor:]
+					m.modalColCursor++
 				}
 			}
 			return m, nil
@@ -398,18 +553,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return newModel, newModel.updatePreview()
 
 		case "f2":
-			// Save in modal editor (if in modal), otherwise create entity
-			if m.modalEditor {
-				return m.saveModalChanges(), nil
-			}
-			// TODO: Create entity
+			// Create entity - open modal editor with empty template
+			return m.openModalEditor("create"), nil
 		case "f3":
 			return m.readEntityDetails()
 		case "f4":
-			// TODO: Update entity
+			// Update entity - open modal editor with current entity
+			return m.openModalEditor("update"), nil
 		case "f5":
-			// Open modal editor for entity details
-			return m.openModalEditor(), nil
+			// Copy entity - open modal editor with copy of current entity
+			return m.openModalEditor("copy"), nil
 		case "f7":
 			// TODO: Filter
 		case "f8":
@@ -572,21 +725,64 @@ func (m model) drillDown() (tea.Model, tea.Cmd) {
 		m.loading = true
 		cmd = tea.Batch(loadEntitySets(m.odata), m.updatePreview())
 		
-	case 1: // EntitySets -> Entities
+	case 1: // EntitySets -> Entities or Metadata
 		// Extract entity set name from display text (remove capabilities part)
 		entitySetName := strings.Split(selectedItem, " [")[0]
-		newColumn = column{
-			title:   entitySetName,
-			items:   []string{"Loading..."},
-			cursor:  0,
-			focused: false,
+		
+		// Handle $metadata specially
+		if entitySetName == "$metadata" {
+			newColumn = column{
+				title:     "Metadata",
+				items:     []string{"Loading metadata..."},
+				cursor:    0,
+				focused:   false,
+				isDetails: true,
+			}
+			m.columns = append(m.columns, newColumn)
+			m.activeColumn++
+			m.columns[m.activeColumn].focused = true
+			m.updateColumnSizes()
+			m.loading = true
+			
+			// Load metadata
+			cmd = func() tea.Msg {
+				metadataURL := strings.TrimSuffix(m.odata.baseURL, "/") + "/$metadata"
+				req, err := http.NewRequest("GET", metadataURL, nil)
+				if err != nil {
+					return errorMsg{err: err.Error(), context: "metadata"}
+				}
+				if m.odata.username != "" && m.odata.password != "" {
+					req.SetBasicAuth(m.odata.username, m.odata.password)
+				}
+				
+				resp, err := m.odata.client.Do(req)
+				if err != nil {
+					return errorMsg{err: err.Error(), context: "metadata"}
+				}
+				defer resp.Body.Close()
+				
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return errorMsg{err: err.Error(), context: "metadata"}
+				}
+				
+				return entitiesMsg{entitySet: "Metadata", entities: []map[string]interface{}{
+					{"metadata": string(body)}}, hasMore: false}
+			}
+		} else {
+			newColumn = column{
+				title:   entitySetName,
+				items:   []string{"Loading..."},
+				cursor:  0,
+				focused: false,
+			}
+			m.columns = append(m.columns, newColumn)
+			m.activeColumn++
+			m.columns[m.activeColumn].focused = true
+			m.updateColumnSizes()
+			m.loading = true
+			cmd = tea.Batch(loadEntities(m.odata, entitySetName), m.updatePreview())
 		}
-		m.columns = append(m.columns, newColumn)
-		m.activeColumn++
-		m.columns[m.activeColumn].focused = true
-		m.updateColumnSizes()
-		m.loading = true
-		cmd = tea.Batch(loadEntities(m.odata, entitySetName), m.updatePreview())
 		
 	case 2: // Entities -> JSON Details
 		// Get the actual entity data from the previous column
@@ -780,14 +976,30 @@ func (m model) updatePreview() tea.Cmd {
 		if m.odata != nil {
 			entitySetName := strings.Split(selectedItem, " [")[0]
 			
+			// Check if this is $metadata
+			if entitySetName == "$metadata" {
+				return func() tea.Msg {
+					// Fetch and preview metadata
+					metadataURL := strings.TrimSuffix(m.odata.baseURL, "/") + "/$metadata"
+					// For now, just show the URL and info
+					return previewMsg{previewType: "metadata", data: map[string]interface{}{
+						"url": metadataURL,
+						"note": "Service Metadata - press Enter to view full metadata document",
+						"type": "OData Service Metadata"}}
+				}
+			}
+			
 			// Check if this is a function import
 			if strings.HasPrefix(entitySetName, "[FUNC] ") {
 				funcName := strings.TrimPrefix(entitySetName, "[FUNC] ")
 				return func() tea.Msg {
+					// Get function metadata if available
 					return previewMsg{previewType: "function", data: map[string]interface{}{
 						"name": funcName,
 						"note": "Function Import - press Enter to view parameters and execute",
-						"type": "Function Import"}}
+						"type": "Function Import",
+						"description": fmt.Sprintf("OData Function Import: %s", funcName),
+						"parameters": "Parameters will be shown when metadata is loaded"}}
 				}
 			}
 			
@@ -895,23 +1107,54 @@ func (m model) saveChanges() model {
 	return m
 }
 
-// openModalEditor opens a full-screen modal editor for entity details
-func (m model) openModalEditor() model {
-	// Only allow modal editor when viewing details of an entity
-	if m.activeColumn >= 0 && m.activeColumn < len(m.columns) {
-		currentCol := m.columns[m.activeColumn]
-		if currentCol.isDetails && len(currentCol.entities) > 0 {
-			m.modalEditor = true
-			// Copy current JSON content for editing
-			m.modalContent = make([]string, len(currentCol.items))
-			copy(m.modalContent, currentCol.items)
-			m.modalCursor = currentCol.cursor
-			m.modalScroll = currentCol.scrollOffset
-			m.logs = append(m.logs, "Modal editor opened - F2 to save, ESC to cancel")
+// openModalEditor opens a full-screen modal editor for entity operations
+func (m model) openModalEditor(operation string) model {
+	m.modalEditor = true
+	m.modalOperation = operation
+	m.modalCursor = 0
+	m.modalColCursor = 0
+	m.modalScroll = 0
+	
+	switch operation {
+	case "create":
+		// Create empty JSON template for new entity
+		m.modalContent = []string{
+			"{",
+			"  ",
+			"}",
+		}
+		m.modalCursor = 1
+		m.modalColCursor = 2
+		m.logs = append(m.logs, "Create mode - F2 to save new entity, ESC to cancel")
+		
+	case "update", "copy":
+		// Use current entity for update or copy
+		if m.activeColumn >= 0 && m.activeColumn < len(m.columns) {
+			currentCol := m.columns[m.activeColumn]
+			if currentCol.isDetails && len(currentCol.entities) > 0 {
+				// Copy current JSON content for editing
+				m.modalContent = make([]string, len(currentCol.items))
+				copy(m.modalContent, currentCol.items)
+				m.modalCursor = 0
+				m.modalColCursor = 0
+				
+				if operation == "update" {
+					m.logs = append(m.logs, "Update mode - F2 to save changes, ESC to cancel")
+				} else {
+					m.logs = append(m.logs, "Copy mode - F2 to save as new entity, ESC to cancel")
+				}
+			} else {
+				m.modalEditor = false
+				m.logs = append(m.logs, "Update/Copy only available for entity details")
+				return m
+			}
 		} else {
-			m.logs = append(m.logs, "Modal editor only available for entity details")
+			m.modalEditor = false
+			m.logs = append(m.logs, "No entity selected for update/copy")
+			return m
 		}
 	}
+	
 	return m
 }
 
@@ -1016,7 +1259,7 @@ func (m model) View() string {
 		Foreground(lipgloss.Color("99")).
 		Render(headerText)
 
-	footerText := "F2:Create F3:Read F4:Update F5:ModalEdit F7:Filter F8:Delete F9:Toggle Logs F10:Exit | ESC:Back"
+	footerText := "F2:Create F3:Read F4:Update F5:Copy F7:Filter F8:Delete F9:Toggle Logs F10:Exit | ESC:Back"
 	if m.modalEditor {
 		footerText = "MODAL EDITOR - F2:Save ESC:Cancel | Navigation: Up/Down/PgUp/PgDown/Home/End"
 	} else if m.editMode {
@@ -1100,11 +1343,26 @@ func (m model) renderModalOverlay(baseView string) string {
 		prefix := fmt.Sprintf("%4d ", lineNum+1)
 		
 		if lineNum == m.modalCursor {
-			// Highlight current line
+			// Show column cursor position within line
+			displayLine := line
+			if m.modalColCursor <= len(line) {
+				// Insert cursor marker
+				before := line[:m.modalColCursor]
+				after := line[m.modalColCursor:]
+				if m.modalColCursor < len(line) {
+					// Show cursor as background highlight on character
+					cursorChar := string(line[m.modalColCursor])
+					displayLine = before + lipgloss.NewStyle().Background(lipgloss.Color("226")).Foreground(lipgloss.Color("0")).Render(cursorChar) + after[1:]
+				} else {
+					// Show cursor at end of line
+					displayLine = line + lipgloss.NewStyle().Background(lipgloss.Color("226")).Render(" ")
+				}
+			}
+			
 			line = lipgloss.NewStyle().
 				Background(lipgloss.Color("99")).
-				Foreground(lipgloss.Color("0")).
-				Render(prefix + line)
+				Foreground(lipgloss.Color("15")).
+				Render(prefix) + displayLine
 		} else {
 			line = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("241")).
