@@ -1,0 +1,20 @@
+{
+  "services": [
+    {
+      "name": "Local OData Service",
+      "url": "http://localhost:8080/odata",
+      "username": "admin",
+      "password": "secret"
+    },
+    {
+      "name": "Corporate Service",
+      "url": "https://corporate.example.com/odata/v4",
+      "username": "user@company.com",
+      "password": "corporate-password"
+    },
+    {
+      "name": "Public Demo Service",
+      "url": "https://services.odata.org/V4/TripPinServiceRW"
+    }
+  ]
+}

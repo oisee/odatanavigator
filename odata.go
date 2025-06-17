@@ -13,8 +13,10 @@ const (
 )
 
 type ODataService struct {
-	baseURL string
-	client  *http.Client
+	baseURL  string
+	client   *http.Client
+	username string
+	password string
 }
 
 // OData V2 response structures
@@ -36,6 +38,15 @@ func NewODataServiceWithURL(url string) *ODataService {
 	}
 }
 
+func NewODataServiceWithAuth(url, username, password string) *ODataService {
+	return &ODataService{
+		baseURL:  url,
+		client:   &http.Client{},
+		username: username,
+		password: password,
+	}
+}
+
 func (o *ODataService) GetEntitySets() ([]string, error) {
 	// For V2, we'll use hardcoded entity sets since metadata parsing is complex
 	return []string{
@@ -51,7 +62,16 @@ func (o *ODataService) GetEntitySets() ([]string, error) {
 func (o *ODataService) GetEntities(entitySet string, top int) ([]map[string]interface{}, error) {
 	url := fmt.Sprintf("%s/%s?$top=%d&$format=json", o.baseURL, entitySet, top)
 	
-	resp, err := o.client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	if o.username != "" && o.password != "" {
+		req.SetBasicAuth(o.username, o.password)
+	}
+	
+	resp, err := o.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch entities: %w", err)
 	}
@@ -78,7 +98,16 @@ func (o *ODataService) GetEntities(entitySet string, top int) ([]map[string]inte
 func (o *ODataService) GetEntity(entitySet, id string) (map[string]interface{}, error) {
 	url := fmt.Sprintf("%s/%s(%s)?$format=json", o.baseURL, entitySet, id)
 	
-	resp, err := o.client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	if o.username != "" && o.password != "" {
+		req.SetBasicAuth(o.username, o.password)
+	}
+	
+	resp, err := o.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch entity: %w", err)
 	}
@@ -149,4 +178,79 @@ func formatEntityDetails(entity map[string]interface{}) []string {
 	}
 	
 	return details
+}
+
+type EntityCapabilities struct {
+	Searchable  bool
+	Filterable  bool
+	Creatable   bool
+	Updatable   bool
+	Deletable   bool
+	MediaType   bool
+}
+
+func GetEntitySetCapabilities(entitySet string) EntityCapabilities {
+	// For demo purposes, return capabilities based on entity set
+	// In a real implementation, this would parse the OData $metadata
+	switch entitySet {
+	case "Categories":
+		return EntityCapabilities{
+			Searchable: true,
+			Filterable: true,
+			Creatable:  true,
+			Updatable:  true,
+			Deletable:  true,
+			MediaType:  false,
+		}
+	case "Products":
+		return EntityCapabilities{
+			Searchable: true,
+			Filterable: true,
+			Creatable:  true,
+			Updatable:  true,
+			Deletable:  false, // Products might not be deletable
+			MediaType:  false,
+		}
+	case "Advertisements":
+		return EntityCapabilities{
+			Searchable: true,
+			Filterable: true,
+			Creatable:  true,
+			Updatable:  true,
+			Deletable:  true,
+			MediaType:  true, // Advertisements might have media
+		}
+	default:
+		return EntityCapabilities{
+			Searchable: true,
+			Filterable: true,
+			Creatable:  false,
+			Updatable:  false,
+			Deletable:  false,
+			MediaType:  false,
+		}
+	}
+}
+
+func (c EntityCapabilities) String() string {
+	var caps []string
+	if c.Searchable {
+		caps = append(caps, "S")
+	}
+	if c.Filterable {
+		caps = append(caps, "F")
+	}
+	if c.Creatable {
+		caps = append(caps, "C")
+	}
+	if c.Updatable {
+		caps = append(caps, "U")
+	}
+	if c.Deletable {
+		caps = append(caps, "D")
+	}
+	if c.MediaType {
+		caps = append(caps, "M")
+	}
+	return fmt.Sprintf("[%s]", strings.Join(caps, ""))
 }
