@@ -39,6 +39,10 @@ type model struct {
 	editContent    []string
 	editCursor     int     // Current cursor position in edit mode
 	previewLoading bool
+	modalEditor    bool    // Modal editor mode
+	modalContent   []string // Content being edited in modal
+	modalCursor    int     // Cursor position in modal
+	modalScroll    int     // Scroll offset in modal
 }
 
 func initialModel() model {
@@ -200,6 +204,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.previewColumn.items = strings.Split(string(jsonData), "\n")
 						}
 					}
+				case "function":
+					if funcData, ok := msg.data.(map[string]interface{}); ok {
+						m.previewColumn.title = "Function Preview"
+						m.previewColumn.items = []string{
+							fmt.Sprintf("Name: %v", funcData["name"]),
+							fmt.Sprintf("Type: %v", funcData["type"]),
+							"",
+							fmt.Sprintf("%v", funcData["note"]),
+						}
+					}
 				case "navigation":
 					if navData, ok := msg.data.(map[string]interface{}); ok {
 						m.previewColumn.title = "Navigation"
@@ -255,6 +269,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateColumnSizes()
 
 	case tea.KeyMsg:
+		// Handle modal editor first
+		if m.modalEditor {
+			switch msg.String() {
+			case "ctrl+c", "q", "f10":
+				return m, tea.Quit
+			case "esc":
+				// Cancel modal editor
+				m.modalEditor = false
+				m.modalContent = nil
+				m.modalCursor = 0
+				m.modalScroll = 0
+				m.logs = append(m.logs, "Modal editor cancelled")
+				return m, nil
+			case "f2":
+				// Save changes and close modal
+				return m.saveModalChanges(), nil
+			case "up", "k":
+				if m.modalCursor > 0 {
+					m.modalCursor--
+					if m.modalCursor < m.modalScroll {
+						m.modalScroll = m.modalCursor
+					}
+				}
+			case "down", "j":
+				if m.modalCursor < len(m.modalContent)-1 {
+					m.modalCursor++
+					modalHeight := int(float64(m.height) * 0.95) - 4
+					if m.modalCursor >= m.modalScroll+modalHeight {
+						m.modalScroll = m.modalCursor - modalHeight + 1
+					}
+				}
+			case "pgup":
+				modalHeight := int(float64(m.height) * 0.95) - 4
+				newCursor := m.modalCursor - modalHeight
+				if newCursor < 0 {
+					newCursor = 0
+				}
+				m.modalCursor = newCursor
+				m.modalScroll = newCursor
+			case "pgdown":
+				modalHeight := int(float64(m.height) * 0.95) - 4
+				newCursor := m.modalCursor + modalHeight
+				if newCursor >= len(m.modalContent) {
+					newCursor = len(m.modalContent) - 1
+				}
+				m.modalCursor = newCursor
+				if m.modalCursor >= m.modalScroll+modalHeight {
+					m.modalScroll = m.modalCursor - modalHeight + 1
+				}
+			case "home":
+				m.modalCursor = 0
+				m.modalScroll = 0
+			case "end":
+				if len(m.modalContent) > 0 {
+					m.modalCursor = len(m.modalContent) - 1
+					modalHeight := int(float64(m.height) * 0.95) - 4
+					if len(m.modalContent) > modalHeight {
+						m.modalScroll = len(m.modalContent) - modalHeight
+					} else {
+						m.modalScroll = 0
+					}
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q", "f10":
 			return m, tea.Quit
@@ -318,16 +398,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return newModel, newModel.updatePreview()
 
 		case "f2":
+			// Save in modal editor (if in modal), otherwise create entity
+			if m.modalEditor {
+				return m.saveModalChanges(), nil
+			}
 			// TODO: Create entity
 		case "f3":
 			return m.readEntityDetails()
 		case "f4":
 			// TODO: Update entity
 		case "f5":
-			if m.editMode {
-				return m.saveChanges(), nil
-			}
-			return m.toggleEditMode(), nil
+			// Open modal editor for entity details
+			return m.openModalEditor(), nil
 		case "f7":
 			// TODO: Filter
 		case "f8":
@@ -611,7 +693,27 @@ func (m model) readEntityDetails() (tea.Model, tea.Cmd) {
 
 // extractEntityKey extracts the primary key value from an entity
 func extractEntityKey(entity map[string]interface{}) string {
-	// Common key field patterns
+	// First, check for __metadata.id or __metadata.uri which contains the proper key
+	if metadata, ok := entity["__metadata"].(map[string]interface{}); ok {
+		if id, ok := metadata["id"].(string); ok {
+			// Extract key from URI like "https://host/service/EntitySet('key')"
+			if lastParen := strings.LastIndex(id, "("); lastParen != -1 {
+				if endParen := strings.Index(id[lastParen:], ")"); endParen != -1 {
+					return id[lastParen+1 : lastParen+endParen]
+				}
+			}
+		}
+		if uri, ok := metadata["uri"].(string); ok {
+			// Extract key from URI like "https://host/service/EntitySet('key')"
+			if lastParen := strings.LastIndex(uri, "("); lastParen != -1 {
+				if endParen := strings.Index(uri[lastParen:], ")"); endParen != -1 {
+					return uri[lastParen+1 : lastParen+endParen]
+				}
+			}
+		}
+	}
+	
+	// Fallback: Common key field patterns
 	keyFields := []string{"Program", "Class", "Interface", "Package", "Function", 
 		"ID", "Id", "Key", "Code", "Number", 
 		"ProductID", "CategoryID", "CustomerID", "OrderID", "EmployeeID"}
@@ -630,7 +732,7 @@ func extractEntityKey(entity map[string]interface{}) string {
 		}
 	}
 	
-	// Fallback: look for any field that might be a key
+	// Last fallback: look for any field that might be a key
 	for k, v := range entity {
 		if v != nil && !strings.HasPrefix(k, "__") && !strings.Contains(strings.ToLower(k), "date") {
 			if str, ok := v.(string); ok && str != "" {
@@ -677,6 +779,18 @@ func (m model) updatePreview() tea.Cmd {
 	case 1: // EntitySets - preview entities
 		if m.odata != nil {
 			entitySetName := strings.Split(selectedItem, " [")[0]
+			
+			// Check if this is a function import
+			if strings.HasPrefix(entitySetName, "[FUNC] ") {
+				funcName := strings.TrimPrefix(entitySetName, "[FUNC] ")
+				return func() tea.Msg {
+					return previewMsg{previewType: "function", data: map[string]interface{}{
+						"name": funcName,
+						"note": "Function Import - press Enter to view parameters and execute",
+						"type": "Function Import"}}
+				}
+			}
+			
 			return func() tea.Msg {
 				entities, _, err := m.odata.GetEntitiesWithCount(entitySetName, 10) // Default to 10 for preview
 				if err != nil {
@@ -781,6 +895,72 @@ func (m model) saveChanges() model {
 	return m
 }
 
+// openModalEditor opens a full-screen modal editor for entity details
+func (m model) openModalEditor() model {
+	// Only allow modal editor when viewing details of an entity
+	if m.activeColumn >= 0 && m.activeColumn < len(m.columns) {
+		currentCol := m.columns[m.activeColumn]
+		if currentCol.isDetails && len(currentCol.entities) > 0 {
+			m.modalEditor = true
+			// Copy current JSON content for editing
+			m.modalContent = make([]string, len(currentCol.items))
+			copy(m.modalContent, currentCol.items)
+			m.modalCursor = currentCol.cursor
+			m.modalScroll = currentCol.scrollOffset
+			m.logs = append(m.logs, "Modal editor opened - F2 to save, ESC to cancel")
+		} else {
+			m.logs = append(m.logs, "Modal editor only available for entity details")
+		}
+	}
+	return m
+}
+
+// saveModalChanges saves changes from modal editor and closes it
+func (m model) saveModalChanges() model {
+	if !m.modalEditor || m.activeColumn >= len(m.columns) {
+		return m
+	}
+	
+	currentCol := &m.columns[m.activeColumn]
+	if !currentCol.isDetails || len(currentCol.entities) == 0 {
+		m.logs = append(m.logs, "No entity data to save")
+		m.modalEditor = false
+		return m
+	}
+
+	// Try to parse the edited JSON
+	jsonContent := strings.Join(m.modalContent, "\n")
+	var updatedEntity map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonContent), &updatedEntity); err != nil {
+		m.logs = append(m.logs, fmt.Sprintf("Invalid JSON: %v", err))
+		return m
+	}
+
+	// Update the stored entity
+	currentCol.entities[0] = updatedEntity
+	
+	// Update the display
+	jsonData, err := json.MarshalIndent(updatedEntity, "", "  ")
+	if err != nil {
+		m.logs = append(m.logs, fmt.Sprintf("Error formatting JSON: %v", err))
+		m.modalEditor = false
+		return m
+	}
+	
+	currentCol.items = strings.Split(string(jsonData), "\n")
+	currentCol.cursor = 0
+	currentCol.scrollOffset = 0
+	
+	// Close modal
+	m.modalEditor = false
+	m.modalContent = nil
+	m.modalCursor = 0
+	m.modalScroll = 0
+	
+	m.logs = append(m.logs, "Changes saved locally (not persisted to server)")
+	
+	return m
+}
 
 func (m model) View() string {
 	if m.width == 0 {
@@ -836,8 +1016,10 @@ func (m model) View() string {
 		Foreground(lipgloss.Color("99")).
 		Render(headerText)
 
-	footerText := "F2:Create F3:Read F4:Update F5:Edit F7:Filter F8:Delete F9:Toggle Logs F10:Exit | ESC:Back"
-	if m.editMode {
+	footerText := "F2:Create F3:Read F4:Update F5:ModalEdit F7:Filter F8:Delete F9:Toggle Logs F10:Exit | ESC:Back"
+	if m.modalEditor {
+		footerText = "MODAL EDITOR - F2:Save ESC:Cancel | Navigation: Up/Down/PgUp/PgDown/Home/End"
+	} else if m.editMode {
 		footerText = "EDIT MODE - F5:Save ESC:Cancel | " + footerText
 	}
 	footer := lipgloss.NewStyle().
@@ -856,7 +1038,14 @@ func (m model) View() string {
 	
 	parts = append(parts, "", footer)
 	
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	view := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	
+	// Overlay modal editor if active
+	if m.modalEditor {
+		view = m.renderModalOverlay(view)
+	}
+	
+	return view
 }
 
 func (m model) renderLogs(height int) string {
@@ -883,6 +1072,106 @@ func (m model) renderLogs(height int) string {
 	}
 	
 	return logStyle.Render(content)
+}
+
+// renderModalOverlay renders a modal editor overlay on top of the main view
+func (m model) renderModalOverlay(baseView string) string {
+	// Calculate modal dimensions (95% of screen)
+	modalWidth := int(float64(m.width) * 0.95)
+	modalHeight := int(float64(m.height) * 0.95)
+	
+	// Calculate content dimensions
+	contentHeight := modalHeight - 4 // Account for borders and header
+	
+	// Prepare modal content
+	var visibleContent []string
+	if len(m.modalContent) > 0 {
+		endIdx := m.modalScroll + contentHeight
+		if endIdx > len(m.modalContent) {
+			endIdx = len(m.modalContent)
+		}
+		visibleContent = m.modalContent[m.modalScroll:endIdx]
+	}
+	
+	// Add cursor indicator and line numbers
+	var renderedLines []string
+	for i, line := range visibleContent {
+		lineNum := m.modalScroll + i
+		prefix := fmt.Sprintf("%4d ", lineNum+1)
+		
+		if lineNum == m.modalCursor {
+			// Highlight current line
+			line = lipgloss.NewStyle().
+				Background(lipgloss.Color("99")).
+				Foreground(lipgloss.Color("0")).
+				Render(prefix + line)
+		} else {
+			line = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("241")).
+				Render(prefix) + line
+		}
+		renderedLines = append(renderedLines, line)
+	}
+	
+	// Fill remaining space with empty lines
+	for len(renderedLines) < contentHeight {
+		renderedLines = append(renderedLines, "")
+	}
+	
+	content := strings.Join(renderedLines, "\n")
+	
+	// Create modal box
+	modalStyle := lipgloss.NewStyle().
+		Width(modalWidth).
+		Height(modalHeight).
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(lipgloss.Color("99")).
+		Background(lipgloss.Color("0")).
+		Foreground(lipgloss.Color("15"))
+	
+	title := " Modal Editor - F2: Save | ESC: Cancel "
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Background(lipgloss.Color("99")).
+		Foreground(lipgloss.Color("0")).
+		Padding(0, 1)
+	
+	// Render modal with title
+	modal := titleStyle.Render(title) + "\n" + content
+	
+	// Calculate position to center modal
+	x := (m.width - modalWidth) / 2
+	y := (m.height - modalHeight) / 2
+	
+	// Create overlay by splitting base view into lines and inserting modal
+	baseLines := strings.Split(baseView, "\n")
+	
+	// Ensure we have enough lines
+	for len(baseLines) < m.height {
+		baseLines = append(baseLines, "")
+	}
+	
+	modalLines := strings.Split(modalStyle.Render(modal), "\n")
+	
+	// Overlay modal lines onto base view
+	for i, modalLine := range modalLines {
+		if y+i >= 0 && y+i < len(baseLines) {
+			if x >= 0 && x+len(modalLine) <= len(baseLines[y+i]) {
+				// Simple overlay - just replace the section
+				line := baseLines[y+i]
+				if x+len(modalLine) < len(line) {
+					baseLines[y+i] = line[:x] + modalLine + line[x+len(modalLine):]
+				} else {
+					baseLines[y+i] = line[:x] + modalLine
+				}
+			} else {
+				// Modal extends beyond base line, just replace the line
+				baseLines[y+i] = strings.Repeat(" ", x) + modalLine
+			}
+		}
+	}
+	
+	return strings.Join(baseLines, "\n")
 }
 
 func min(a, b int) int {
